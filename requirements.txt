@@ -1,9 +1,5 @@
 fastapi
 uvicorn
-librosa
-soundfile
-numpy
-scipy
 python-multipart
-requests
 pydantic
+requests
