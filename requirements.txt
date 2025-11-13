@@ -4,3 +4,5 @@ librosa
 soundfile
 numpy
 scipy
+python-multipart
+requests
