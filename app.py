@@ -1,40 +1,134 @@
-import tempfile, os
-import soundfile as sf
-import librosa
-from fastapi import FastAPI, File, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, File, UploadFile, Form
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import uvicorn
 
 app = FastAPI()
 
-def to_wav(tmp_path) -> str:
-  y, sr = librosa.load(tmp_path, sr=44100, mono=True)
-  out = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
-  sf.write(out, y, 44100)
-  return out
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-def estimate_bpm_from_audio(wav_path: str):
-  y, sr = librosa.load(wav_path, sr=None, mono=True)
-  if y.size == 0:
-    return 0
-  tempi = librosa.beat.tempo(y=y, sr=sr, aggregate=None)
-  return int(round(float(tempi.mean()))) if tempi is not None and len(tempi)>0 else 0
+# -------------------------------
+# MODELS
+# -------------------------------
+class TextPayload(BaseModel):
+    text: str
+    audio_type: str | None = None
+    action_type: str | None = None
+    estimate_music: bool | None = False
+    capture_date: str | None = None
+    upload_date: str | None = None
+
+
+# -------------------------------
+# ROUTES
+# -------------------------------
 
 @app.get("/")
-def root():
-  return {"ok": True, "message": "Shadow analyzer up"}
+def home():
+    return {"status": "Shadow backend running", "version": "1.0"}
 
-@app.post("/analyze")
-async def analyze(file: UploadFile = File(...)):
-  try:
-    raw = await file.read()
-    tmp_in = tempfile.NamedTemporaryFile(delete=False)
-    tmp_in.write(raw); tmp_in.flush()
-    wav_path = to_wav(tmp_in.name)
-    bpm = estimate_bpm_from_audio(wav_path)
-    os.unlink(tmp_in.name); os.unlink(wav_path)
-    return JSONResponse({
-      "key": "", "scale": "", "bpm": bpm,
-      "progression": "", "confidence": 0.0, "note_count": 0
-    })
-  except Exception as e:
-    return JSONResponse({"error": str(e)}, status_code=500)
+
+# ------------ TEXT ANALYSIS (from transcription) ------------
+@app.post("/analyse/text")
+async def analyse_text(payload: TextPayload):
+    """
+    Zapier sends: transcription text + metadata
+    Returns: structured JSON for Airtable / Notion
+    """
+
+    text = payload.text.lower()
+
+    # Quick mode detection (better logic later)
+    if payload.audio_type:
+        mode = payload.audio_type
+    elif "song" in text:
+        mode = "Music"
+    elif "idea" in text or "story" in text:
+        mode = "Writing"
+    else:
+        mode = "Concept"
+
+    result = {
+        "mode": mode,
+        "summary": text[:200] + "...",
+        "tags": ["Idea", "Reflection"],
+        "genre": "",
+        "mood": "",
+        "key_guess": "",
+        "bpm_guess": "",
+        "chord_progression": "",
+        "references": [],
+        "capture_date": payload.capture_date,
+        "upload_date": payload.upload_date,
+    }
+
+    return result
+
+
+# ------------ AUDIO FILE ANALYSIS ------------
+@app.post("/analyse/audio")
+async def analyse_audio(
+    file: UploadFile = File(...),
+    audio_type: str = Form(None),
+    action_type: str = Form(None),
+    estimate_music: bool = Form(False),
+    capture_date: str = Form(None),
+    upload_date: str = Form(None),
+):
+    """
+    Zapier sends audio file.
+    Returns placeholder analysis until we plug in the music ML model.
+    """
+
+    filename = file.filename
+
+    # For now, fake detection (test stability first)
+    result = {
+        "filename": filename,
+        "audio_type": audio_type,
+        "action_type": action_type,
+        "estimate_music": estimate_music,
+        "analysis": "Audio received successfully (v1 placeholder)",
+        "key_guess": "",
+        "bpm_guess": "",
+        "chord_progression": "",
+        "capture_date": capture_date,
+        "upload_date": upload_date,
+    }
+
+    return result
+
+
+# ------------ IMAGE ANALYSIS -----------------
+@app.post("/analyse/image")
+async def analyse_image(
+    file: UploadFile = File(...),
+    action_type: str = Form(None),
+    capture_date: str = Form(None),
+    upload_date: str = Form(None),
+):
+    result = {
+        "filename": file.filename,
+        "action_type": action_type,
+        "analysis": "Image received successfully (v1 placeholder)",
+        "capture_date": capture_date,
+        "upload_date": upload_date,
+    }
+
+    return result
+
+
+# ------------ HEALTH CHECK FOR ZAPIER ----------
+@app.get("/health")
+def health():
+    return {"ok": True}
+
+
+if __name__ == "__main__":
+    uvicorn.run("app:app", host="0.0.0.0", port=8000)
