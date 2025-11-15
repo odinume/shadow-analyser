@@ -79,15 +79,11 @@ import base64
 import json
 import requests
 
-# TEMP: Hardcode credentials so we can get it working tonight.
-# Replace with os.getenv later once Railway behaves.
 ACR_HOST = "identify-ap-southeast-1.acrcloud.com"
 ACR_ACCESS_KEY = "2e792315bc46e4ea4654b407a28a0f9a"
 ACR_ACCESS_SECRET = "4qmupBXDrMs3EaAJhLo9MNp4QukHgFZUiCcrv17G"
 
-
-from pydub import AudioSegment
-from tempfile import NamedTemporaryFile
+MAX_BYTES_FOR_ACR = 2_000_000  # ~2MB chunk for ACR (roughly 15–25s depending on format)
 
 @app.post("/analyse/audio")
 async def analyse_audio(
@@ -97,44 +93,23 @@ async def analyse_audio(
     estimate_music: bool = Form(False),
     capture_date: str = Form(None),
     upload_date: str = Form(None),
-    start_time: int = Form(0),       # <-- NEW
-    duration: int = Form(15),        # <-- NEW
 ):
-    """
-    Receives full audio file.
-    Trims a segment for ACRCloud (start_time → start_time+duration),
-    but keeps original full file data for Airtable.
-    """
-
-    # -------- Read full audio into memory --------
+    # 1) Read full file (so original is still usable elsewhere)
     full_audio_bytes = await file.read()
+    original_size = len(full_audio_bytes)
 
-    # -------- Load secrets --------
-    host = os.environ.get("ACR_HOST")
-    access_key = os.environ.get("ACR_ACCESS_KEY")
-    secret_key = os.environ.get("ACR_SECRET_KEY")
+    # 2) Create a cropped version JUST for ACR
+    #    Use a middle slice so you're more likely to catch the good part
+    if original_size <= MAX_BYTES_FOR_ACR:
+        acr_bytes = full_audio_bytes
+        crop_info = "full file used"
+    else:
+        start = max(0, original_size // 2 - MAX_BYTES_FOR_ACR // 2)
+        end = start + MAX_BYTES_FOR_ACR
+        acr_bytes = full_audio_bytes[start:end]
+        crop_info = f"middle {MAX_BYTES_FOR_ACR} bytes of {original_size}"
 
-    if not host or not access_key or not secret_key:
-        return {"error": "ACRCloud keys missing in environment variables"}
-
-    # -------- Use pydub to load full audio --------
-    audio = AudioSegment.from_file(
-        io.BytesIO(full_audio_bytes),
-        format=file.filename.split(".")[-1].lower()
-    )
-
-    # Convert times from seconds → milliseconds
-    start_ms = max(0, start_time * 1000)
-    end_ms = min(len(audio), start_ms + duration * 1000)
-
-    trimmed = audio[start_ms:end_ms]
-
-    # Save trimmed segment to temp file to send to ACR
-    with NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
-        trimmed.export(tmp.name, format="mp3")
-        trimmed_path = tmp.name
-
-    # -------- ACRCloud request prep --------
+    # ---- ACRCloud auth + request ----
     http_method = "POST"
     http_uri = "/v1/identify"
     data_type = "audio"
@@ -144,7 +119,7 @@ async def analyse_audio(
     string_to_sign = (
         http_method + "\n" +
         http_uri + "\n" +
-        access_key + "\n" +
+        ACR_ACCESS_KEY + "\n" +
         data_type + "\n" +
         signature_version + "\n" +
         timestamp
@@ -152,47 +127,41 @@ async def analyse_audio(
 
     sign = base64.b64encode(
         hmac.new(
-            secret_key.encode('utf-8'),
-            string_to_sign.encode('utf-8'),
+            ACR_ACCESS_SECRET.encode("utf-8"),
+            string_to_sign.encode("utf-8"),
             hashlib.sha1
         ).digest()
-    ).decode('utf-8')
+    ).decode("utf-8")
 
-    # Read trimmed file bytes
-    with open(trimmed_path, "rb") as f:
-        trimmed_bytes = f.read()
+    files = {
+        "sample": ("audio", acr_bytes, file.content_type)
+    }
 
     data = {
-        "access_key": access_key,
-        "sample_bytes": str(len(trimmed_bytes)),
+        "access_key": ACR_ACCESS_KEY,
+        "sample_bytes": str(len(acr_bytes)),
         "timestamp": timestamp,
         "signature": sign,
         "data_type": data_type,
-        "signature_version": signature_version
-    }
-
-    files = {
-        "sample": ("audio.mp3", trimmed_bytes, "audio/mpeg")
+        "signature_version": signature_version,
     }
 
     acr_response = requests.post(
-        f"https://{host}/v1/identify",
+        f"https://{ACR_HOST}/v1/identify",
         files=files,
-        data=data
+        data=data,
+        timeout=15,
     )
 
     try:
         acr_json = acr_response.json()
-    except:
-        acr_json = {"error": "Invalid JSON returned from ACRCloud", "raw": acr_response.text}
+    except Exception:
+        acr_json = {
+            "error": "Invalid JSON returned from ACRCloud",
+            "status_code": acr_response.status_code,
+            "raw": acr_response.text,
+        }
 
-    # Cleanup temp file
-    try:
-        os.remove(trimmed_path)
-    except:
-        pass
-
-    # -------- Final output --------
     return {
         "filename": file.filename,
         "audio_type": audio_type,
@@ -200,18 +169,12 @@ async def analyse_audio(
         "estimate_music": estimate_music,
         "capture_date": capture_date,
         "upload_date": upload_date,
-
-        # FULL FILE still goes to Airtable — you handle that in Zapier
-        "full_file_stored": True,
-
-        # ACR result for the trimmed slice
+        "original_size_bytes": original_size,
+        "sent_to_acr_bytes": len(acr_bytes),
+        "crop_info": crop_info,
         "acr_result": acr_json,
-
-        # Debug info
-        "start_time_used": start_time,
-        "duration_used": duration,
-        "segment_length_ms": end_ms - start_ms,
     }
+
 
 
 # ------------ HEALTH CHECK FOR ZAPIER ----------
