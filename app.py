@@ -161,7 +161,8 @@ async def analyse_audio(
             "status_code": acr_response.status_code,
             "raw": acr_response.text,
         }
-
+        
+    # --------- Return the structured result ---------
     return {
         "filename": file.filename,
         "audio_type": audio_type,
@@ -169,11 +170,10 @@ async def analyse_audio(
         "estimate_music": estimate_music,
         "capture_date": capture_date,
         "upload_date": upload_date,
-        "original_size_bytes": original_size,
-        "sent_to_acr_bytes": len(acr_bytes),
-        "crop_info": crop_info,
-        "acr_result": acr_json,
+        "acr_result": acr_json,                     # still there, parsed
+        "acr_result_raw": json.dumps(acr_json),     # NEW: raw JSON string
     }
+
 
 
 
