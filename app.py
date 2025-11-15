@@ -72,13 +72,19 @@ async def analyse_text(payload: TextPayload):
 
 
 # ------------ AUDIO FILE ANALYSIS ------------
-import os
 import time
 import hmac
 import hashlib
 import base64
 import json
 import requests
+
+# TEMP: Hardcode credentials so we can get it working tonight.
+# Replace with os.getenv later once Railway behaves.
+ACR_HOST = "identify-ap-southeast-1.acrcloud.com"
+ACR_ACCESS_KEY = "2e792315bc46e4ea4654b407a28a0f9a"
+ACR_ACCESS_SECRET = "4qmupBXDrMs3EaAJhLo9MNp4QukHgFZUiCcrv17G"
+
 
 @app.post("/analyse/audio")
 async def analyse_audio(
@@ -91,19 +97,11 @@ async def analyse_audio(
 ):
     """
     Receives an audio file from Zapier, sends it to ACRCloud,
-    and returns structured musical metadata + transcription details.
+    and returns structured musical metadata.
     """
 
     # --------- read file into memory ---------
     audio_bytes = await file.read()
-
-    # --------- load keys from environment ---------
-    host = os.environ.get("ACR_HOST")
-    access_key = os.environ.get("ACR_ACCESS_KEY")
-    secret_key = os.environ.get("ACR_SECRET_KEY")
-
-    if not host or not access_key or not secret_key:
-        return {"error": "ACRCloud keys missing in environment variables"}
 
     # --------- ACRCloud request prep ---------
     http_method = "POST"
@@ -112,32 +110,31 @@ async def analyse_audio(
     signature_version = "1"
     timestamp = str(int(time.time()))
 
-    # Create the signature
     string_to_sign = (
         http_method + "\n" +
         http_uri + "\n" +
-        access_key + "\n" +
+        ACR_ACCESS_KEY + "\n" +
         data_type + "\n" +
         signature_version + "\n" +
         timestamp
     )
 
-    # Sign with HMAC-SHA1
+    # sign request
     sign = base64.b64encode(
         hmac.new(
-            secret_key.encode('utf-8'),
+            ACR_ACCESS_SECRET.encode('utf-8'),
             string_to_sign.encode('utf-8'),
             hashlib.sha1
         ).digest()
     ).decode('utf-8')
 
-    # --------- Form Data ---------
+    # form payload
     files = {
         "sample": ("audio", audio_bytes, file.content_type)
     }
 
     data = {
-        "access_key": access_key,
+        "access_key": ACR_ACCESS_KEY,
         "sample_bytes": str(len(audio_bytes)),
         "timestamp": timestamp,
         "signature": sign,
@@ -145,19 +142,19 @@ async def analyse_audio(
         "signature_version": signature_version
     }
 
-    # --------- Send to ACRCloud ---------
+    # --------- call ACRCloud ---------
     acr_response = requests.post(
-        f"https://{host}/v1/identify",
+        f"https://{ACR_HOST}/v1/identify",
         files=files,
         data=data
     )
 
     try:
         acr_json = acr_response.json()
-    except:
-        acr_json = {"error": "Invalid JSON returned from ACRCloud", "raw": acr_response.text}
+    except Exception:
+        acr_json = {"error": "ACRCloud returned non-JSON", "raw": acr_response.text}
 
-    # --------- Return the structured result ---------
+    # --------- final response ---------
     return {
         "filename": file.filename,
         "audio_type": audio_type,
@@ -167,24 +164,6 @@ async def analyse_audio(
         "upload_date": upload_date,
         "acr_result": acr_json
     }
-
-    filename = file.filename
-
-    # For now, fake detection (test stability first)
-    result = {
-        "filename": filename,
-        "audio_type": audio_type,
-        "action_type": action_type,
-        "estimate_music": estimate_music,
-        "analysis": "Audio received successfully (v1 placeholder)",
-        "key_guess": "",
-        "bpm_guess": "",
-        "chord_progression": "",
-        "capture_date": capture_date,
-        "upload_date": upload_date,
-    }
-
-    return result
 
 
 # ------------ IMAGE ANALYSIS -----------------
