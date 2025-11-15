@@ -72,6 +72,14 @@ async def analyse_text(payload: TextPayload):
 
 
 # ------------ AUDIO FILE ANALYSIS ------------
+import os
+import time
+import hmac
+import hashlib
+import base64
+import json
+import requests
+
 @app.post("/analyse/audio")
 async def analyse_audio(
     file: UploadFile = File(...),
@@ -82,9 +90,83 @@ async def analyse_audio(
     upload_date: str = Form(None),
 ):
     """
-    Zapier sends audio file.
-    Returns placeholder analysis until we plug in the music ML model.
+    Receives an audio file from Zapier, sends it to ACRCloud,
+    and returns structured musical metadata + transcription details.
     """
+
+    # --------- read file into memory ---------
+    audio_bytes = await file.read()
+
+    # --------- load keys from environment ---------
+    host = os.environ.get("ACR_HOST")
+    access_key = os.environ.get("ACR_ACCESS_KEY")
+    secret_key = os.environ.get("ACR_SECRET_KEY")
+
+    if not host or not access_key or not secret_key:
+        return {"error": "ACRCloud keys missing in environment variables"}
+
+    # --------- ACRCloud request prep ---------
+    http_method = "POST"
+    http_uri = "/v1/identify"
+    data_type = "audio"
+    signature_version = "1"
+    timestamp = str(int(time.time()))
+
+    # Create the signature
+    string_to_sign = (
+        http_method + "\n" +
+        http_uri + "\n" +
+        access_key + "\n" +
+        data_type + "\n" +
+        signature_version + "\n" +
+        timestamp
+    )
+
+    # Sign with HMAC-SHA1
+    sign = base64.b64encode(
+        hmac.new(
+            secret_key.encode('utf-8'),
+            string_to_sign.encode('utf-8'),
+            hashlib.sha1
+        ).digest()
+    ).decode('utf-8')
+
+    # --------- Form Data ---------
+    files = {
+        "sample": ("audio", audio_bytes, file.content_type)
+    }
+
+    data = {
+        "access_key": access_key,
+        "sample_bytes": str(len(audio_bytes)),
+        "timestamp": timestamp,
+        "signature": sign,
+        "data_type": data_type,
+        "signature_version": signature_version
+    }
+
+    # --------- Send to ACRCloud ---------
+    acr_response = requests.post(
+        f"https://{host}/v1/identify",
+        files=files,
+        data=data
+    )
+
+    try:
+        acr_json = acr_response.json()
+    except:
+        acr_json = {"error": "Invalid JSON returned from ACRCloud", "raw": acr_response.text}
+
+    # --------- Return the structured result ---------
+    return {
+        "filename": file.filename,
+        "audio_type": audio_type,
+        "action_type": action_type,
+        "estimate_music": estimate_music,
+        "capture_date": capture_date,
+        "upload_date": upload_date,
+        "acr_result": acr_json
+    }
 
     filename = file.filename
 
